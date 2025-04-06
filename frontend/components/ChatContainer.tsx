@@ -368,43 +368,57 @@ const ChatContainer: React.FC = () => {
     const handleIncomingMessage = useCallback((message: any) => {
         console.log('Processing incoming message:', message);
 
-        // Skip if no message ID or sender
+        // Skip if no message ID
         if (!message.id) {
             console.warn('Invalid message - missing ID:', message);
             return;
         }
 
+        // Extract sender info from message
         if (!message.sender) {
             console.warn('Invalid message - missing sender information:', message);
             return;
         }
 
-        // Check if message is for current user
-        const isForCurrentUser = message.recipient_id === user?.id || message.sender.id === user?.id;
-        if (!isForCurrentUser) {
-            console.log('Message not for current user, ignoring');
+        // Determine if the message is for the current user (sent or received)
+        const isMessageForCurrentUser =
+            (message.sender.id === user?.id) || // User is the sender
+            (message.recipient_id === user?.id); // User is the recipient
+
+        if (!isMessageForCurrentUser) {
+            console.log('Message not relevant to current user, ignoring');
             return;
         }
 
-        // Check if message is for current conversation
-        const isForCurrentConversation = selectedConversation && (
-            message.conversation_id === selectedConversation.id ||
-            (!message.conversation_id && (
-                (message.sender.id === user?.id && message.recipient_id === selectedConversation.participants.find(p => p.id !== user?.id)?.id) ||
-                (message.recipient_id === user?.id && message.sender.id === selectedConversation.participants.find(p => p.id !== user?.id)?.id)
-            ))
-        );
+        // Check if the message belongs to the currently selected conversation
+        let isForCurrentConversation = false;
+
+        if (selectedConversation) {
+            if (message.conversation_id && message.conversation_id === selectedConversation.id) {
+                // Direct match on conversation ID
+                isForCurrentConversation = true;
+            } else if (!message.conversation_id) {
+                // Fallback to matching on participants for older messages
+                const otherParticipant = selectedConversation.participants.find(p => p.id !== user?.id);
+                if (otherParticipant &&
+                    ((message.sender.id === user?.id && message.recipient_id === otherParticipant.id) ||
+                        (message.recipient_id === user?.id && message.sender.id === otherParticipant.id))) {
+                    isForCurrentConversation = true;
+                }
+            }
+        }
 
         console.log('Is message for current conversation?', isForCurrentConversation);
-        console.log('Current conversation:', selectedConversation?.id);
-        console.log('Message conversation:', message.conversation_id);
+        console.log('Current conversation ID:', selectedConversation?.id);
+        console.log('Message conversation ID:', message.conversation_id);
 
         if (isForCurrentConversation) {
+            // Add message to the current conversation
             setMessages(prev => {
-                // Ensure prev is array
+                // Ensure prev is an array
                 const currentMessages = Array.isArray(prev) ? [...prev] : [];
 
-                // Remove temp message if exists
+                // Remove temp message if this is a confirmed one
                 const filtered = message.temp_id
                     ? currentMessages.filter(m => m.id !== message.temp_id)
                     : currentMessages;
@@ -415,8 +429,8 @@ const ChatContainer: React.FC = () => {
                     return filtered;
                 }
 
-                // Format new message
-                const newMessage = {
+                // Format new message for UI
+                const newMessage: Message = {
                     id: message.id,
                     content: message.content,
                     sender: {
@@ -430,9 +444,10 @@ const ChatContainer: React.FC = () => {
                 console.log('Adding new message to UI:', newMessage);
                 return [...filtered, newMessage];
             });
-        } else {
-            console.log('Message is for another conversation');
-            // Could implement notifications here
+        } else if (message.conversation_id) {
+            // This is a message for a different conversation
+            console.log('Message is for another conversation, could show notification');
+            // TODO: Implement notifications for messages in other conversations
         }
     }, [user, selectedConversation]);
 
@@ -640,6 +655,9 @@ const ChatContainer: React.FC = () => {
             // Create temp ID for optimistic update
             const tempId = `temp-${Date.now()}`;
 
+            // Find recipient
+            const recipientId = selectedConversation.participants.find(p => p.id !== user?.id)?.id;
+
             // Add temp message to UI immediately
             const tempMessage: Message = {
                 id: tempId,
@@ -661,8 +679,9 @@ const ChatContainer: React.FC = () => {
                 type: 'message',
                 content: newMessage,
                 conversation_id: selectedConversation.id,
-                recipient_id: selectedConversation.participants.find(p => p.id !== user?.id)?.id,
-                temp_id: tempId
+                recipient_id: recipientId,
+                temp_id: tempId,
+                timestamp: new Date().toISOString()
             };
 
             console.log('Sending message to server:', messageObj);

@@ -331,26 +331,83 @@ func (c *WebSocketClient) readPump(wc *WebSocketController) {
 			// Handle regular message
 			log.Printf("Message received from %s", c.userID)
 
+			// Extract message data
+			content, _ := data["content"].(string)
+			conversationID, _ := data["conversation_id"].(string)
+			recipientID, _ := data["recipient_id"].(string)
+			tempID, _ := data["temp_id"].(string)
+
+			if content == "" || (conversationID == "" && recipientID == "") {
+				log.Printf("Invalid message data: missing required fields")
+				continue
+			}
+
+			// Generate a new message ID
+			messageID := uuid.New().String()
+
+			// Create database message
+			// First ensure we have a valid conversation ID
+			if conversationID == "" && recipientID != "" {
+				// Create consistent conversation ID for direct messages
+				conversationID = createConversationID(c.userID, recipientID)
+				log.Printf("Created conversation ID %s for users %s and %s",
+					conversationID, c.userID, recipientID)
+			}
+
+			// Save message to database
+			currentTime := time.Now()
+			_, err := wc.db.Exec(`
+				INSERT INTO messages (
+					id, conversation_id, sender_id, content, 
+					created_at, delivered_at, message_type, encrypted
+				)
+				VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+			`,
+				messageID, conversationID, c.userID, content,
+				currentTime, currentTime, "text", false,
+			)
+
+			if err != nil {
+				log.Printf("Failed to save message to database: %v", err)
+				// Send error response to client
+				errorResp := map[string]interface{}{
+					"type":    "error",
+					"message": "Failed to save message",
+					"temp_id": tempID,
+					"id":      uuid.New().String(),
+				}
+				errorJSON, _ := json.Marshal(errorResp)
+				c.send <- errorJSON
+				continue
+			}
+
+			log.Printf("Message saved to database with ID: %s", messageID)
+
 			// Add metadata
-			data["id"] = uuid.New().String()
-			data["timestamp"] = time.Now()
+			data["id"] = messageID
+			data["timestamp"] = currentTime
 			data["sender"] = map[string]interface{}{
 				"id":        c.userID,
 				"name":      c.userName,
 				"avatarUrl": c.avatarURL,
 			}
+			data["conversation_id"] = conversationID
 
 			respJSON, _ := json.Marshal(data)
 			wc.broadcast <- respJSON
-
-			// Persist message to database if needed (just logging for now)
-			content, _ := data["content"].(string)
-			if content != "" {
-				log.Printf("Message from %s: %s", c.userID, content)
-			}
 
 		default:
 			log.Printf("Unknown message type: %s", messageType)
 		}
 	}
+}
+
+// Helper function to create consistent conversation IDs for direct messages
+func createConversationID(userID1, userID2 string) string {
+	// Sort IDs to ensure consistent conversation ID regardless of order
+	if userID1 > userID2 {
+		userID1, userID2 = userID2, userID1
+	}
+	// Create a deterministic UUID from the two user IDs
+	return uuid.NewSHA1(uuid.Nil, []byte(userID1+userID2)).String()
 }
