@@ -1,20 +1,22 @@
 'use client';
 
 import React, { useEffect } from 'react';
-import { Container, Typography, Box } from '@mui/material';
+import { Container, Typography, Box, Alert } from '@mui/material';
 import GoogleLoginButton from '@/components/GoogleLoginButton';
 import { useAuth } from '@/contexts/AuthContext';
-import { useRouter } from 'next/navigation';
+import { useRouter, useSearchParams } from 'next/navigation';
 
 export default function LoginPage() {
-    const { isAuthenticated, login } = useAuth();
+    const { isAuthenticated, user, token, login } = useAuth();
     const router = useRouter();
+    const searchParams = useSearchParams();
+    const error = searchParams.get('error');
 
     useEffect(() => {
-        if (isAuthenticated) {
-            router.push('/');
+        if (isAuthenticated && user && token) {
+            router.push('/chat');
         }
-    }, [isAuthenticated, router]);
+    }, [isAuthenticated, user, token, router]);
 
     return (
         <Container maxWidth="sm">
@@ -32,6 +34,11 @@ export default function LoginPage() {
                 <Typography variant="body1" sx={{ mb: 4, textAlign: 'center' }}>
                     A sarcastically named, on-premises WhatsApp clone with end-to-end encryption.
                 </Typography>
+                {error && (
+                    <Alert severity="error" sx={{ mb: 4, width: '100%' }}>
+                        Login failed: {error}
+                    </Alert>
+                )}
                 <GoogleLoginButton onClick={login} />
             </Box>
         </Container>

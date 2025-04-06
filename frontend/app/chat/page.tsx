@@ -6,16 +6,16 @@ import { useAuth } from '@/contexts/AuthContext';
 import ChatContainer from '@/components/ChatContainer';
 
 export default function ChatPage() {
-    const { isAuthenticated } = useAuth();
+    const { isAuthenticated, user, token } = useAuth();
     const router = useRouter();
 
     useEffect(() => {
-        if (!isAuthenticated) {
+        if (!isAuthenticated || !user || !token) {
             router.push('/login');
         }
-    }, [isAuthenticated, router]);
+    }, [isAuthenticated, user, token, router]);
 
-    if (!isAuthenticated) {
+    if (!isAuthenticated || !user || !token) {
         return null;
     }
 

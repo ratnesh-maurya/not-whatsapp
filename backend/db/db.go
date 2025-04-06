@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"log"
 
+	"github.com/RatneshMaurya/not-whatsapp/backend/config"
 	_ "github.com/lib/pq"
-	"github.com/your-org/not-whatsapp/backend/config"
 )
 
 func NewDB(cfg *config.Config) (*sql.DB, error) {

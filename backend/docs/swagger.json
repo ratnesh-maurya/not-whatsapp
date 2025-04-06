@@ -1,12 +1,19 @@
 {
     "swagger": "2.0",
     "info": {
-        "description": "NotWhatsApp API documentation",
+        "description": "A secure messaging application",
         "title": "NotWhatsApp API",
         "contact": {},
         "version": "1.0"
     },
     "host": "localhost:8080",
     "basePath": "/api/v1",
-    "paths": {}
+    "paths": {},
+    "securityDefinitions": {
+        "BearerAuth": {
+            "type": "apiKey",
+            "name": "Authorization",
+            "in": "header"
+        }
+    }
 }

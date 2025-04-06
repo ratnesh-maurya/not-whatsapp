@@ -22,10 +22,10 @@ type DB struct {
 
 func (db *DB) CreateOrUpdateUser(googleID, email, name, avatarURL, publicKey string) (*User, error) {
 	query := `
-		INSERT INTO users (google_id, email, name, avatar_url, public_key)
-		VALUES ($1, $2, $3, $4, $5)
+		INSERT INTO users (google_id, email, name, avatar_url, public_key, last_seen)
+		VALUES ($1, $2, $3, $4, $5, CURRENT_TIMESTAMP)
 		ON CONFLICT (google_id) DO UPDATE
-		SET email = $2, name = $3, avatar_url = $4, public_key = $5
+		SET email = $2, name = $3, avatar_url = $4, public_key = $5, last_seen = CURRENT_TIMESTAMP
 		RETURNING id, google_id, email, name, avatar_url, public_key, created_at, last_seen
 	`
 
@@ -83,4 +83,37 @@ func (db *DB) UpdateLastSeen(userID string) error {
 
 	_, err := db.Exec(query, userID)
 	return err
+}
+
+func (db *DB) GetUsers() ([]User, error) {
+	query := `
+		SELECT id, email, name, avatar_url, public_key, created_at, last_seen
+		FROM users
+		ORDER BY name ASC
+	`
+	rows, err := db.Query(query)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var users []User
+	for rows.Next() {
+		var user User
+		err := rows.Scan(
+			&user.ID,
+			&user.Email,
+			&user.Name,
+			&user.AvatarURL,
+			&user.PublicKey,
+			&user.CreatedAt,
+			&user.LastSeen,
+		)
+		if err != nil {
+			return nil, err
+		}
+		users = append(users, user)
+	}
+
+	return users, nil
 }
