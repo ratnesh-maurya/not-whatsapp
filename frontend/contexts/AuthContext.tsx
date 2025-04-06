@@ -26,68 +26,78 @@ const AuthContext = createContext<AuthContextType | undefined>(undefined);
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
     const [user, setUser] = useState<User | null>(null);
     const [token, setToken] = useState<string | null>(null);
+    const [isInitialized, setIsInitialized] = useState(false);
     const router = useRouter();
 
     useEffect(() => {
         const initializeAuth = async () => {
             try {
-                // Check for stored user and token
+                console.log('Initializing auth...');
                 const storedUser = localStorage.getItem('user');
                 const storedToken = localStorage.getItem('token');
 
                 if (storedUser && storedToken) {
-                    // Validate the token by making a request to the backend
-                    const response = await fetch(`${API_URL}/api/v1/users/me`, {
-                        headers: {
-                            'Authorization': `Bearer ${storedToken}`
-                        }
-                    });
+                    console.log('Found stored credentials, validating...');
+                    try {
+                        const response = await fetch(`${API_URL}/api/v1/users/me`, {
+                            headers: {
+                                'Authorization': `Bearer ${storedToken}`
+                            }
+                        });
 
-                    if (response.ok) {
-                        const userData = await response.json();
-                        setUser(userData);
-                        setToken(storedToken);
-                        // If we're on the login page, redirect to chat
-                        if (window.location.pathname === '/login') {
-                            router.push('/chat');
+                        if (response.ok) {
+                            console.log('Token is valid');
+                            const userData = await response.json();
+                            setUser(userData);
+                            setToken(storedToken);
+
+                            // If we're on the login page, redirect to chat
+                            if (window.location.pathname === '/login') {
+                                console.log('Redirecting to chat from login page');
+                                router.replace('/chat');
+                            }
+                        } else {
+                            console.log('Token is invalid, clearing credentials');
+                            localStorage.removeItem('user');
+                            localStorage.removeItem('token');
+                            setUser(null);
+                            setToken(null);
+
+                            // Only redirect to login if we're not already there
+                            if (window.location.pathname !== '/login' && window.location.pathname !== '/auth/callback') {
+                                console.log('Redirecting to login due to invalid token');
+                                router.replace('/login');
+                            }
                         }
-                    } else {
-                        // Token is invalid or expired
+                    } catch (error) {
+                        console.error('Error validating token:', error);
                         localStorage.removeItem('user');
                         localStorage.removeItem('token');
                         setUser(null);
                         setToken(null);
-                        // Only redirect to login if we're not already there
-                        if (window.location.pathname !== '/login') {
-                            router.push('/login');
+                        if (window.location.pathname !== '/login' && window.location.pathname !== '/auth/callback') {
+                            router.replace('/login');
                         }
                     }
                 } else {
-                    // No stored credentials
+                    console.log('No stored credentials found');
                     setUser(null);
                     setToken(null);
-                    // Only redirect to login if we're not already there and not on the callback page
                     if (window.location.pathname !== '/login' && window.location.pathname !== '/auth/callback') {
-                        router.push('/login');
+                        console.log('Redirecting to login due to no credentials');
+                        router.replace('/login');
                     }
                 }
             } catch (error) {
-                console.error('Error initializing auth:', error);
-                localStorage.removeItem('user');
-                localStorage.removeItem('token');
-                setUser(null);
-                setToken(null);
-                // Only redirect to login if we're not already there and not on the callback page
-                if (window.location.pathname !== '/login' && window.location.pathname !== '/auth/callback') {
-                    router.push('/login');
-                }
+                console.error('Error in auth initialization:', error);
+            } finally {
+                setIsInitialized(true);
             }
         };
 
         initializeAuth();
     }, [router]);
 
-    // Update localStorage when user or token changes
     useEffect(() => {
         if (user && token) {
             localStorage.setItem('user', JSON.stringify(user));
@@ -104,8 +114,12 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         localStorage.removeItem('token');
         setUser(null);
         setToken(null);
-        router.push('/login');
+        router.replace('/login');
     };
+
+    if (!isInitialized) {
+        return <div>Loading...</div>;
+    }
 
     return (
         <AuthContext.Provider
