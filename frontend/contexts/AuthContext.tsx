@@ -17,6 +17,7 @@ interface AuthContextType {
     isAuthenticated: boolean;
     login: () => void;
     logout: () => void;
+    refreshToken: () => Promise<boolean>;
     setUser: (user: User | null) => void;
     setToken: (token: string | null) => void;
 }
@@ -63,8 +64,9 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
                             setUser(null);
                             setToken(null);
 
-                            // Only redirect to login if we're not already there
-                            if (window.location.pathname !== '/login' && window.location.pathname !== '/auth/callback') {
+                            // Only redirect to login if we're not already there and not on the home page
+                            const allowedPaths = ['/login', '/auth/callback', '/'];
+                            if (!allowedPaths.includes(window.location.pathname)) {
                                 console.log('Redirecting to login due to invalid token');
                                 router.replace('/login');
                             }
@@ -75,7 +77,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
                         localStorage.removeItem('token');
                         setUser(null);
                         setToken(null);
-                        if (window.location.pathname !== '/login' && window.location.pathname !== '/auth/callback') {
+                        const allowedPaths = ['/login', '/auth/callback', '/'];
+                        if (!allowedPaths.includes(window.location.pathname)) {
                             router.replace('/login');
                         }
                     }
@@ -83,7 +86,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
                     console.log('No stored credentials found');
                     setUser(null);
                     setToken(null);
-                    if (window.location.pathname !== '/login' && window.location.pathname !== '/auth/callback') {
+                    const allowedPaths = ['/login', '/auth/callback', '/'];
+                    if (!allowedPaths.includes(window.location.pathname)) {
                         console.log('Redirecting to login due to no credentials');
                         router.replace('/login');
                     }
@@ -106,6 +110,14 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }, [user, token]);
 
     const login = () => {
+        // Store current path for return after login
+        if (typeof window !== 'undefined') {
+            const currentPath = window.location.pathname;
+            // Only store the path if it's the home page
+            if (currentPath === '/') {
+                localStorage.setItem('returnTo', currentPath);
+            }
+        }
         window.location.href = `${API_URL}/api/v1/auth/google/login`;
     };
 
@@ -115,6 +127,54 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         setUser(null);
         setToken(null);
         router.replace('/login');
+    };
+
+    const refreshToken = async (): Promise<boolean> => {
+        try {
+            if (!token) return false;
+
+            console.log('Refreshing user session...');
+            const response = await fetch(`${API_URL}/api/v1/users/me`, {
+                headers: {
+                    'Authorization': `Bearer ${token}`
+                }
+            });
+
+            if (response.ok) {
+                console.log('✅ Session refreshed successfully');
+                const userData = await response.json();
+
+                // Update user data if it's changed
+                if (JSON.stringify(userData) !== JSON.stringify(user)) {
+                    console.log('Updating user data with latest from server');
+                    setUser(userData);
+                }
+
+                return true;
+            } else {
+                console.error('❌ Session refresh failed:', response.status);
+
+                // Only clear credentials and redirect if response is 401 Unauthorized
+                if (response.status === 401) {
+                    console.log('Token expired, logging out');
+                    localStorage.removeItem('user');
+                    localStorage.removeItem('token');
+                    setUser(null);
+                    setToken(null);
+
+                    // Only redirect if not already on login or home page
+                    const allowedPaths = ['/login', '/auth/callback', '/'];
+                    if (!allowedPaths.includes(window.location.pathname)) {
+                        router.replace('/login');
+                    }
+                }
+
+                return false;
+            }
+        } catch (error) {
+            console.error('Error refreshing token:', error);
+            return false;
+        }
     };
 
     if (!isInitialized) {
@@ -129,6 +189,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
                 isAuthenticated: !!user && !!token,
                 login,
                 logout,
+                refreshToken,
                 setUser,
                 setToken,
             }}

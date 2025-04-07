@@ -394,7 +394,58 @@ func (c *WebSocketClient) readPump(wc *WebSocketController) {
 			data["conversation_id"] = conversationID
 
 			respJSON, _ := json.Marshal(data)
-			wc.broadcast <- respJSON
+
+			// Directly send the message to the relevant clients
+			// instead of broadcasting to all clients
+			if recipientID != "" {
+				// Send to the recipient if they're connected
+				wc.mu.Lock()
+				sentToRecipient := false
+				if recipient, ok := wc.clients[recipientID]; ok {
+					log.Printf("Sending message directly to recipient: %s", recipientID)
+					select {
+					case recipient.send <- respJSON:
+						log.Printf("Message sent to recipient %s successfully", recipientID)
+						sentToRecipient = true
+					default:
+						log.Printf("Failed to send message to recipient %s, channel might be full", recipientID)
+					}
+				} else {
+					log.Printf("Recipient %s is not currently connected, message will be delivered when they connect", recipientID)
+				}
+
+				// Debug info about current connections
+				connectedClients := make([]string, 0, len(wc.clients))
+				for clientID := range wc.clients {
+					connectedClients = append(connectedClients, clientID)
+				}
+				log.Printf("Current connected clients: %v", connectedClients)
+
+				// Store message delivery status in database
+				_, err = wc.db.Exec(`
+					UPDATE messages 
+					SET delivered = $1, delivered_at = $2
+					WHERE id = $3
+				`, sentToRecipient, currentTime, messageID)
+
+				if err != nil {
+					log.Printf("Failed to update message delivery status: %v", err)
+				}
+
+				wc.mu.Unlock()
+
+				// Always send confirmation back to the sender
+				select {
+				case c.send <- respJSON:
+					log.Printf("Message confirmation sent to sender %s", c.userID)
+				default:
+					log.Printf("Failed to send confirmation to sender %s", c.userID)
+				}
+			} else {
+				// If no specific recipient (group chat), broadcast to all
+				log.Printf("Broadcasting message to all clients (group chat)")
+				wc.broadcast <- respJSON
+			}
 
 		default:
 			log.Printf("Unknown message type: %s", messageType)

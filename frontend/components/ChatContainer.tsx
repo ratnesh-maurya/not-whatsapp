@@ -7,6 +7,8 @@ import { useAuth } from '../contexts/AuthContext';
 import { API_URL } from '../config';
 import ConversationList from './ConversationList';
 import UserList from './UserList';
+import ProfileSection from './ProfileSection';
+import { createTheme, ThemeProvider } from '@mui/material/styles';
 
 interface Message {
     id: string;
@@ -41,6 +43,64 @@ const ChatContainer: React.FC = () => {
     const [selectedConversation, setSelectedConversation] = useState<Conversation | null>(null);
     const [activeTab, setActiveTab] = useState(0);
     const [connectionStatus, setConnectionStatus] = useState<'connecting' | 'connected' | 'disconnected'>('disconnected');
+    const [darkMode, setDarkMode] = useState<boolean>(false);
+
+    // Theme settings
+    const theme = createTheme({
+        palette: {
+            mode: darkMode ? 'dark' : 'light',
+            primary: {
+                main: '#3b82f6',
+            },
+            secondary: {
+                main: '#8b5cf6',
+            },
+            background: {
+                default: darkMode ? '#0f172a' : '#f8fafc',
+                paper: darkMode ? '#1e293b' : '#ffffff',
+            },
+        },
+        shape: {
+            borderRadius: 16,
+        },
+        typography: {
+            fontFamily: '"Inter", "Roboto", "Helvetica", "Arial", sans-serif',
+            h6: {
+                fontWeight: 600,
+            }
+        },
+        components: {
+            MuiPaper: {
+                styleOverrides: {
+                    root: {
+                        backgroundImage: darkMode ?
+                            'linear-gradient(to bottom right, rgba(30, 41, 59, 0.8), rgba(15, 23, 42, 0.8))' :
+                            'linear-gradient(to bottom right, rgba(255, 255, 255, 0.9), rgba(248, 250, 252, 0.9))',
+                        backdropFilter: 'blur(10px)',
+                        boxShadow: darkMode ?
+                            '0 10px 15px -3px rgba(0, 0, 0, 0.3), 0 4px 6px -4px rgba(0, 0, 0, 0.3)' :
+                            '0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -4px rgba(0, 0, 0, 0.1)',
+                        border: darkMode ?
+                            '1px solid rgba(255, 255, 255, 0.1)' :
+                            '1px solid rgba(0, 0, 0, 0.05)',
+                    }
+                }
+            },
+            MuiButton: {
+                styleOverrides: {
+                    root: {
+                        textTransform: 'none',
+                        fontWeight: 600,
+                    }
+                }
+            }
+        }
+    });
+
+    // Toggle dark mode
+    const handleDarkModeToggle = (isDark: boolean) => {
+        setDarkMode(isDark);
+    };
 
     // Refs
     const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -49,12 +109,13 @@ const ChatContainer: React.FC = () => {
     const reconnectAttemptsRef = useRef(0);
     const isMountedRef = useRef(true);
     const connectingRef = useRef(false);
+    const prevSelectedConversationRef = useRef<Conversation | null>(null);
 
     // Constants
     const MAX_RECONNECT_ATTEMPTS = 5;
 
     // Auth context
-    const { token, user } = useAuth();
+    const { token, user, refreshToken } = useAuth();
 
     // Connect to WebSocket
     const connectWebSocket = useCallback(() => {
@@ -113,6 +174,12 @@ const ChatContainer: React.FC = () => {
         try {
             // Create WebSocket without specific protocol
             console.log('Creating basic WebSocket connection');
+
+            // Reset connection attempts if we're explicitly trying to connect
+            if (!reconnectTimeoutRef.current) {
+                reconnectAttemptsRef.current = 0;
+            }
+
             const socket = new WebSocket(wsUrl);
             wsRef.current = socket;
 
@@ -175,11 +242,38 @@ const ChatContainer: React.FC = () => {
                             console.log('Ping sent to keep connection alive');
                         } catch (err) {
                             console.error('Error sending ping:', err);
+
+                            // If we can't send a ping, the connection might be dead
+                            // Try to reconnect
+                            console.log('Connection appears to be dead, attempting to reconnect...');
+                            if (wsRef.current) {
+                                try {
+                                    wsRef.current.close();
+                                } catch (closeErr) {
+                                    console.error('Error closing dead connection:', closeErr);
+                                }
+                                wsRef.current = null;
+                            }
+
+                            // Reset connection attempts to ensure we can reconnect
+                            reconnectAttemptsRef.current = 0;
+                            connectWebSocket();
+
+                            // Stop this ping interval as we're creating a new one in the reconnect
+                            clearInterval(pingInterval);
                         }
                     } else {
+                        console.warn('Cannot send ping - WebSocket not open. Current state:', wsRef.current?.readyState);
                         clearInterval(pingInterval);
+
+                        // If the socket is closed or closing, attempt to reconnect
+                        if (wsRef.current?.readyState === WebSocket.CLOSED || wsRef.current?.readyState === WebSocket.CLOSING) {
+                            console.log('WebSocket is closed, attempting to reconnect...');
+                            reconnectAttemptsRef.current = 0;
+                            connectWebSocket();
+                        }
                     }
-                }, 30000); // Send ping every 30 seconds
+                }, 15000); // Send ping every 15 seconds instead of 30
 
                 // Send initial ping to verify connection
                 try {
@@ -283,6 +377,26 @@ const ChatContainer: React.FC = () => {
                 }
 
                 connectingRef.current = false;
+
+                // Check if we should try to refresh the auth token
+                if (navigator.onLine && token) {
+                    console.log('🔄 WebSocket error occurred, attempting to refresh auth session...');
+
+                    // Try to refresh the token which may help with auth issues
+                    refreshToken().then(success => {
+                        if (success) {
+                            console.log('✅ Auth refreshed successfully, attempting to reconnect WebSocket');
+                            // Schedule reconnection attempt with fresh token
+                            setTimeout(() => {
+                                reconnectAttemptsRef.current = 0; // Reset reconnect attempts
+                                connectWebSocket();
+                            }, 1000);
+                        } else {
+                            console.error('❌ Auth refresh failed after WebSocket error');
+                        }
+                    });
+                }
+
                 // No need to close - onclose will handle it
             };
 
@@ -329,8 +443,219 @@ const ChatContainer: React.FC = () => {
                             break;
 
                         case 'message':
-                            console.log('Received message from server:', data);
-                            handleIncomingMessage(data);
+                            console.log('🔴 RECEIVED MESSAGE:', data);
+                            console.log('🟡 Current user:', user?.id);
+                            console.log('🟢 Selected conversation:', selectedConversation?.id);
+
+                            // Check if message belongs to current conversation
+                            const isForCurrentConversation =
+                                selectedConversation &&
+                                data.conversation_id === selectedConversation.id;
+
+                            // Check if message is for current user
+                            const isForCurrentUser =
+                                (data.sender.id === user?.id) || // User is sender
+                                (data.recipient_id === user?.id); // User is recipient
+
+                            console.log('Message routing:', {
+                                isForCurrentConversation,
+                                isForCurrentUser,
+                                conversation: data.conversation_id,
+                                selectedConversation: selectedConversation?.id,
+                                prevConversationId: prevSelectedConversationRef.current?.id
+                            });
+
+                            // If we lost the selected conversation but this message is for our previous conversation,
+                            // trigger the restoration immediately
+                            if (!selectedConversation &&
+                                prevSelectedConversationRef.current &&
+                                data.conversation_id === prevSelectedConversationRef.current.id &&
+                                isForCurrentUser) {
+                                console.log('🔄 Received message for our lost conversation, restoring...');
+                                const conversationId = prevSelectedConversationRef.current.id;
+                                // Fetch the conversation
+                                (async () => {
+                                    try {
+                                        const response = await fetch(`${API_URL}/api/v1/conversations/${conversationId}`, {
+                                            headers: {
+                                                'Authorization': `Bearer ${token}`
+                                            }
+                                        });
+
+                                        if (response.ok) {
+                                            let conversation = await response.json();
+                                            console.log('✅ Restored conversation from message event:', conversation);
+
+                                            // Ensure the conversation has valid participants
+                                            if (!conversation.participants || !Array.isArray(conversation.participants) || conversation.participants.length === 0) {
+                                                console.log('⚠️ Restored conversation missing participants, ensuring they exist');
+
+                                                // Get reference participants from the previous conversation
+                                                if (prevSelectedConversationRef.current?.participants) {
+                                                    conversation.participants = [...prevSelectedConversationRef.current.participants];
+                                                    console.log('✅ Added participants from previous conversation reference');
+                                                } else if (user) {
+                                                    // If we don't have participants, create at least one with the current user
+                                                    conversation.participants = [{
+                                                        id: user.id,
+                                                        name: user.name,
+                                                        email: user.email || '',
+                                                        avatarUrl: user.avatarUrl || ''
+                                                    }];
+                                                    console.log('✅ Added current user as participant');
+                                                }
+                                            }
+
+                                            // Sanity check the conversation object before setting
+                                            if (!conversation.participants || !Array.isArray(conversation.participants)) {
+                                                console.error('❌ Failed to ensure participants in conversation, creating minimal valid object');
+                                                // Force a minimal valid conversation object
+                                                conversation = {
+                                                    ...conversation,
+                                                    participants: user ? [{
+                                                        id: user.id,
+                                                        name: user.name,
+                                                        email: user.email || '',
+                                                        avatarUrl: user.avatarUrl || ''
+                                                    }] : []
+                                                };
+                                            }
+
+                                            setSelectedConversation(conversation);
+
+                                            // We need to refetch messages after restoring the conversation
+                                            setTimeout(() => {
+                                                if (conversation.id) {
+                                                    fetchMessages(conversation.id);
+                                                }
+                                            }, 100);
+                                        }
+                                    } catch (error) {
+                                        console.error('Error restoring conversation:', error);
+                                    }
+                                })();
+
+                                // Abort further message processing as we're now restoring
+                                return;
+                            }
+
+                            // Only process messages for current user and conversation
+                            if (isForCurrentUser && isForCurrentConversation) {
+                                console.log('✅ Processing message for current conversation');
+                                debugConversationData('BEFORE PROCESSING MESSAGE', selectedConversation);
+
+                                // Verify selected conversation has participants
+                                if (!selectedConversation?.participants || !Array.isArray(selectedConversation.participants)) {
+                                    console.error('❌ Cannot add message - selected conversation has no valid participants');
+
+                                    // Try to refresh the conversation data
+                                    if (selectedConversation?.id && token) {
+                                        console.log('🔄 Attempting to refresh conversation data...');
+                                        fetch(`${API_URL}/api/v1/conversations/${selectedConversation.id}`, {
+                                            headers: {
+                                                'Authorization': `Bearer ${token}`
+                                            }
+                                        })
+                                            .then(response => response.ok ? response.json() : null)
+                                            .then(data => {
+                                                if (data && data.participants && Array.isArray(data.participants)) {
+                                                    console.log('✅ Refreshed conversation data with valid participants');
+                                                    setSelectedConversation(data);
+                                                }
+                                            })
+                                            .catch(err => console.error('❌ Error refreshing conversation:', err));
+                                    }
+                                    return;
+                                }
+
+                                setMessages(prevMessages => {
+                                    // First check if we already have this message
+                                    if (prevMessages.some(m => m.id === data.id)) {
+                                        console.log('⚠️ Message already exists in state, not adding duplicate');
+                                        return prevMessages;
+                                    }
+
+                                    // Remove temp message if this is a confirmed one
+                                    const filtered = data.temp_id
+                                        ? prevMessages.filter(m => m.id !== data.temp_id)
+                                        : prevMessages;
+
+                                    // Format new message for UI
+                                    const newMessage: Message = {
+                                        id: data.id,
+                                        content: data.content,
+                                        sender: {
+                                            id: data.sender.id,
+                                            name: data.sender.name || 'Unknown User',
+                                            avatarUrl: data.sender.avatarUrl || ''
+                                        },
+                                        created_at: data.timestamp ? new Date(data.timestamp).toISOString() : new Date().toISOString()
+                                    };
+
+                                    console.log('✅ Adding message to UI:', newMessage);
+                                    return [...filtered, newMessage];
+                                });
+
+                                // Ensure we scroll to bottom after the update
+                                setTimeout(() => {
+                                    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+                                }, 100);
+                            } else {
+                                console.log('⚠️ Message is not for current conversation or user');
+
+                                // Only refresh conversations if this message is for the current user
+                                if (isForCurrentUser && activeTab === 0) {
+                                    console.log('🔄 Refreshing conversation list due to message in another conversation');
+
+                                    // If no conversation is selected, automatically select this one
+                                    if (!selectedConversation && data.conversation_id) {
+                                        console.log('🔀 No conversation selected, fetching this one: ' + data.conversation_id);
+
+                                        // Fetch the conversation by ID
+                                        (async () => {
+                                            try {
+                                                const response = await fetch(`${API_URL}/api/v1/conversations/${data.conversation_id}`, {
+                                                    headers: {
+                                                        'Authorization': `Bearer ${token}`
+                                                    }
+                                                });
+
+                                                if (response.ok) {
+                                                    const conversation = await response.json();
+                                                    console.log('✅ Automatically selecting conversation:', conversation);
+                                                    setSelectedConversation(conversation);
+
+                                                    // Prevent any further changes to the selected conversation 
+                                                    // while this is being processed
+                                                    return;
+                                                }
+                                            } catch (error) {
+                                                console.error('❌ Error fetching conversation:', error);
+                                            }
+                                        })();
+                                    }
+
+                                    // Use a small delay to avoid excessive refreshes
+                                    setTimeout(() => {
+                                        // This will trigger the ConversationList component to refresh
+                                        const event = new CustomEvent('refreshConversations');
+                                        window.dispatchEvent(event);
+                                    }, 500);
+                                }
+                            }
+
+                            // Play notification sound if user is recipient
+                            if (data.recipient_id === user?.id && data.sender?.id !== user?.id) {
+                                console.log('🔔 New message notification for:', data.sender?.name);
+
+                                // If browser supports notifications and we have permission
+                                if (Notification && Notification.permission === "granted" && document.hidden) {
+                                    new Notification(`Message from ${data.sender?.name}`, {
+                                        body: data.content.substring(0, 50) + (data.content.length > 50 ? '...' : ''),
+                                        icon: data.sender?.avatarUrl || '/logo.png'
+                                    });
+                                }
+                            }
                             break;
 
                         case 'pong':
@@ -364,98 +689,30 @@ const ChatContainer: React.FC = () => {
         }
     }, [token, user, API_URL]);
 
-    // Handle incoming message
-    const handleIncomingMessage = useCallback((message: any) => {
-        console.log('Processing incoming message:', message);
-
-        // Skip if no message ID
-        if (!message.id) {
-            console.warn('Invalid message - missing ID:', message);
-            return;
-        }
-
-        // Extract sender info from message
-        if (!message.sender) {
-            console.warn('Invalid message - missing sender information:', message);
-            return;
-        }
-
-        // Determine if the message is for the current user (sent or received)
-        const isMessageForCurrentUser =
-            (message.sender.id === user?.id) || // User is the sender
-            (message.recipient_id === user?.id); // User is the recipient
-
-        if (!isMessageForCurrentUser) {
-            console.log('Message not relevant to current user, ignoring');
-            return;
-        }
-
-        // Check if the message belongs to the currently selected conversation
-        let isForCurrentConversation = false;
-
-        if (selectedConversation) {
-            if (message.conversation_id && message.conversation_id === selectedConversation.id) {
-                // Direct match on conversation ID
-                isForCurrentConversation = true;
-            } else if (!message.conversation_id) {
-                // Fallback to matching on participants for older messages
-                const otherParticipant = selectedConversation.participants.find(p => p.id !== user?.id);
-                if (otherParticipant &&
-                    ((message.sender.id === user?.id && message.recipient_id === otherParticipant.id) ||
-                        (message.recipient_id === user?.id && message.sender.id === otherParticipant.id))) {
-                    isForCurrentConversation = true;
-                }
-            }
-        }
-
-        console.log('Is message for current conversation?', isForCurrentConversation);
-        console.log('Current conversation ID:', selectedConversation?.id);
-        console.log('Message conversation ID:', message.conversation_id);
-
-        if (isForCurrentConversation) {
-            // Add message to the current conversation
-            setMessages(prev => {
-                // Ensure prev is an array
-                const currentMessages = Array.isArray(prev) ? [...prev] : [];
-
-                // Remove temp message if this is a confirmed one
-                const filtered = message.temp_id
-                    ? currentMessages.filter(m => m.id !== message.temp_id)
-                    : currentMessages;
-
-                // Check for duplicates
-                if (filtered.some(m => m.id === message.id)) {
-                    console.log('Duplicate message, not adding:', message.id);
-                    return filtered;
-                }
-
-                // Format new message for UI
-                const newMessage: Message = {
-                    id: message.id,
-                    content: message.content,
-                    sender: {
-                        id: message.sender.id,
-                        name: message.sender.name || 'Unknown User',
-                        avatarUrl: message.sender.avatarUrl || ''
-                    },
-                    created_at: message.timestamp ? new Date(message.timestamp).toISOString() : new Date().toISOString()
-                };
-
-                console.log('Adding new message to UI:', newMessage);
-                return [...filtered, newMessage];
-            });
-        } else if (message.conversation_id) {
-            // This is a message for a different conversation
-            console.log('Message is for another conversation, could show notification');
-            // TODO: Implement notifications for messages in other conversations
-        }
-    }, [user, selectedConversation]);
-
-    // Initialize WebSocket on mount
+    // Initialize
     useEffect(() => {
+        // Request notification permission
+        if (Notification && Notification.permission !== "granted" && Notification.permission !== "denied") {
+            Notification.requestPermission();
+        }
+
         isMountedRef.current = true;
         reconnectAttemptsRef.current = 0;
         connectingRef.current = false;
+
+        // Set up network status monitoring for reconnection
+        const handleNetworkChange = () => {
+            console.log('🌐 Network status changed. Online:', navigator.onLine);
+            if (navigator.onLine) {
+                console.log('🔄 Network is back online, attempting reconnection...');
+                reconnectAttemptsRef.current = 0; // Reset reconnect attempts
+                if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+                    connectWebSocket();
+                }
+            }
+        };
+
+        window.addEventListener('online', handleNetworkChange);
 
         // Test backend server connectivity first
         const testBackendConnectivity = async () => {
@@ -523,6 +780,9 @@ const ChatContainer: React.FC = () => {
                 clearTimeout(reconnectTimeoutRef.current);
             }
 
+            // Clean up event listeners
+            window.removeEventListener('online', handleNetworkChange);
+
             // Close WebSocket
             if (wsRef.current) {
                 try {
@@ -570,7 +830,8 @@ const ChatContainer: React.FC = () => {
     // Fetch messages when conversation changes
     useEffect(() => {
         if (selectedConversation?.id) {
-            console.log(`Selected conversation: ${selectedConversation.id}`);
+            console.log(`🔍 Selected conversation changed to: ${selectedConversation.id}`);
+            console.log('Conversation details:', selectedConversation);
             setMessages([]);
             fetchMessages(selectedConversation.id);
         }
@@ -586,7 +847,7 @@ const ChatContainer: React.FC = () => {
         if (!token) return;
 
         try {
-            console.log(`Fetching messages for conversation ${conversationId}`);
+            console.log(`📥 Fetching messages for conversation ${conversationId}`);
             const response = await fetch(`${API_URL}/api/v1/conversations/${conversationId}/messages`, {
                 headers: {
                     'Authorization': `Bearer ${token}`
@@ -598,13 +859,40 @@ const ChatContainer: React.FC = () => {
             }
 
             const data = await response.json();
-            console.log(`Received ${Array.isArray(data) ? data.length : 0} messages`);
+            console.log(`📬 Received ${Array.isArray(data) ? data.length : 0} messages from API`);
 
-            // Ensure data is array
-            setMessages(Array.isArray(data) ? data : []);
+            if (Array.isArray(data)) {
+                console.log('Message preview:', data.slice(0, 2));
+            }
+
+            // Only replace messages if this is the first load, otherwise merge
+            setMessages(prevMessages => {
+                // If no previous messages, or we're changing conversations, use the new data
+                if (prevMessages.length === 0) {
+                    return Array.isArray(data) ? data : [];
+                }
+
+                // Otherwise, merge new messages with existing ones
+                const existingIds = new Set(prevMessages.map(m => m.id));
+                const newMessages = (Array.isArray(data) ? data : []).filter(
+                    message => !existingIds.has(message.id)
+                );
+
+                if (newMessages.length > 0) {
+                    console.log(`📩 Adding ${newMessages.length} new messages to the UI`);
+                    return [...prevMessages, ...newMessages];
+                }
+
+                // No new messages found
+                return prevMessages;
+            });
+
+            // Scroll to bottom after loading messages
+            setTimeout(() => {
+                messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+            }, 200);
         } catch (error) {
             console.error('Error fetching messages:', error);
-            setMessages([]);
         }
     };
 
@@ -639,26 +927,183 @@ const ChatContainer: React.FC = () => {
         console.log("Network online status:", navigator.onLine);
     };
 
+    // Ensure the conversation data is preserved after sending messages
+    const preserveConversationData = (conversationId: string) => {
+        if (!token || !conversationId) return;
+
+        console.log('🔄 Preserving conversation data for:', conversationId);
+
+        // First check if current conversation has valid participants
+        if (selectedConversation?.participants && Array.isArray(selectedConversation.participants) && selectedConversation.participants.length > 0) {
+            console.log('✅ Current conversation has valid participants, making backup before refresh');
+            // Make a backup of the current participants
+            const backupParticipants = [...selectedConversation.participants];
+
+            fetch(`${API_URL}/api/v1/conversations/${conversationId}`, {
+                headers: {
+                    'Authorization': `Bearer ${token}`
+                }
+            })
+                .then(response => {
+                    if (!response.ok) {
+                        throw new Error(`Failed to fetch conversation: ${response.status}`);
+                    }
+                    return response.json();
+                })
+                .then(data => {
+                    if (data && selectedConversation?.id === conversationId) {
+                        console.log('✅ Refreshing conversation data to preserve participant info');
+
+                        // Check if the response has valid participants, if not use backup
+                        if (!data.participants || !Array.isArray(data.participants) || data.participants.length === 0) {
+                            console.log('⚠️ Server returned conversation without valid participants, using backup');
+                            data.participants = backupParticipants;
+                        }
+
+                        debugConversationData('BEFORE UPDATE', selectedConversation);
+                        debugConversationData('NEW DATA', data);
+
+                        // Update conversation data while preserving important information
+                        setSelectedConversation(prevConversation => {
+                            if (!prevConversation) return data;
+                            return {
+                                ...data
+                            };
+                        });
+                    }
+                })
+                .catch(err => {
+                    console.error('❌ Error preserving conversation data:', err);
+                });
+        } else {
+            // If we don't have valid participants, we need to get them from the server
+            console.log('⚠️ Current conversation missing participants, fetching full data');
+            fetch(`${API_URL}/api/v1/conversations/${conversationId}`, {
+                headers: {
+                    'Authorization': `Bearer ${token}`
+                }
+            })
+                .then(response => {
+                    if (!response.ok) {
+                        throw new Error(`Failed to fetch conversation: ${response.status}`);
+                    }
+                    return response.json();
+                })
+                .then(data => {
+                    if (data && selectedConversation?.id === conversationId) {
+                        // If server response doesn't have participants, try to construct them
+                        if (!data.participants || !Array.isArray(data.participants) || data.participants.length === 0) {
+                            console.log('⚠️ Server returned conversation without participants, attempting to reconstruct');
+
+                            // Create a basic participant entry for the current user
+                            if (user) {
+                                data.participants = [
+                                    {
+                                        id: user.id,
+                                        name: user.name,
+                                        email: user.email,
+                                        avatarUrl: user.avatarUrl
+                                    }
+                                ];
+                            }
+                        }
+
+                        console.log('✅ Setting conversation with complete data');
+                        setSelectedConversation(data);
+                    }
+                })
+                .catch(err => {
+                    console.error('❌ Error fetching complete conversation data:', err);
+                });
+        }
+    };
+
     // Send a message
     const handleSendMessage = () => {
-        if (!wsRef.current || connectionStatus !== 'connected' || !selectedConversation || !newMessage.trim()) {
-            console.log('Cannot send message:', {
-                wsOpen: !!wsRef.current,
-                connectionStatus,
-                hasConversation: !!selectedConversation,
-                messageLength: newMessage.trim().length
-            });
+        // Check connection status and WebSocket readiness
+        if (!wsRef.current) {
+            console.error('❌ WebSocket connection not established');
+            // Attempt to reconnect
+            connectWebSocket();
             return;
         }
+
+        if (wsRef.current.readyState !== WebSocket.OPEN) {
+            console.error('❌ WebSocket not connected! Current state:', wsRef.current.readyState);
+
+            // If closed or closing, attempt to reconnect
+            if (wsRef.current.readyState === WebSocket.CLOSED || wsRef.current.readyState === WebSocket.CLOSING) {
+                console.log('Attempting to reconnect WebSocket...');
+                connectWebSocket();
+            }
+            return;
+        }
+
+        if (!selectedConversation) {
+            console.error('❌ No conversation selected!');
+            return;
+        }
+
+        // Add defensive check for undefined participants
+        if (!selectedConversation.participants) {
+            console.error('❌ Conversation has no participants (undefined)');
+            // Attempt to refresh the conversation data
+            if (token) {
+                console.log('🔄 Attempting to refresh conversation data...');
+                fetch(`${API_URL}/api/v1/conversations/${selectedConversation.id}`, {
+                    headers: {
+                        'Authorization': `Bearer ${token}`
+                    }
+                })
+                    .then(response => {
+                        if (response.ok) return response.json();
+                        throw new Error(`Failed to refresh conversation: ${response.status}`);
+                    })
+                    .then(data => {
+                        console.log('✅ Refreshed conversation data:', data);
+                        setSelectedConversation(data);
+                    })
+                    .catch(err => {
+                        console.error('❌ Error refreshing conversation:', err);
+                    });
+            }
+            return;
+        }
+
+        if (!Array.isArray(selectedConversation.participants) || selectedConversation.participants.length < 1) {
+            console.error('❌ Conversation has invalid participants array:', selectedConversation.participants);
+            return;
+        }
+
+        // Find recipient - either the other participant or self if solo conversation
+        const recipientId = selectedConversation.participants.length > 1
+            ? selectedConversation.participants.find(p => p.id !== user?.id)?.id
+            : selectedConversation.participants[0]?.id;
+
+        if (!recipientId) {
+            console.error('❌ Cannot find recipient in conversation participants:', selectedConversation.participants);
+            return;
+        }
+
+        if (!newMessage.trim()) {
+            console.log('❌ Cannot send empty message');
+            return;
+        }
+
+        console.log('💬 Sending message:', {
+            conversation: selectedConversation.id,
+            wsOpen: wsRef.current?.readyState === WebSocket.OPEN,
+            connectionStatus,
+            messageLength: newMessage.trim().length
+        });
 
         try {
             // Create temp ID for optimistic update
             const tempId = `temp-${Date.now()}`;
 
-            // Find recipient
-            const recipientId = selectedConversation.participants.find(p => p.id !== user?.id)?.id;
+            console.log(`📤 Sending message to recipient: ${recipientId}`);
 
-            // Add temp message to UI immediately
+            // Add temp message to UI immediately (optimistic update)
             const tempMessage: Message = {
                 id: tempId,
                 content: newMessage,
@@ -670,9 +1115,14 @@ const ChatContainer: React.FC = () => {
                 created_at: new Date().toISOString()
             };
 
-            // Optimistic update - add message to UI before server confirms
+            // Update UI with optimistic message
             setMessages(prev => [...(Array.isArray(prev) ? prev : []), tempMessage]);
-            setNewMessage('');
+            setNewMessage(''); // Clear input field
+
+            // Ensure we scroll to bottom after adding message
+            setTimeout(() => {
+                messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+            }, 100);
 
             // Prepare message for server
             const messageObj = {
@@ -684,18 +1134,81 @@ const ChatContainer: React.FC = () => {
                 timestamp: new Date().toISOString()
             };
 
-            console.log('Sending message to server:', messageObj);
+            console.log('📤 Sending message to server:', messageObj);
 
             // Send to server
             const messageJSON = JSON.stringify(messageObj);
             wsRef.current.send(messageJSON);
+
+            console.log('✅ Message sent successfully');
+
+            // Preserve conversation data after sending to prevent UI issues
+            preserveConversationData(selectedConversation.id);
         } catch (error) {
-            console.error('Error sending message:', error);
+            console.error('❌ Error sending message:', error);
+            // Provide visual feedback that sending failed
+            // You could add a UI toast notification here
         }
+    };
+
+    // Debug function to help identify participant data issues
+    const debugConversationData = (label: string, conversation: any) => {
+        if (!conversation) {
+            console.log(`🔍 DEBUG ${label}: No conversation data available`);
+            return;
+        }
+
+        console.log(`🔍 DEBUG ${label}:`, {
+            id: conversation.id,
+            name: conversation.name,
+            participantsArray: Array.isArray(conversation.participants),
+            participantsLength: conversation.participants ? conversation.participants.length : 0,
+            participants: conversation.participants,
+            currentUser: user?.id,
+            otherParticipant: conversation.participants?.find((p: Participant) => p.id !== user?.id),
+        });
     };
 
     // Select a conversation
     const handleSelectConversation = (conversation: Conversation) => {
+        console.log('🔄 Selecting conversation:', conversation.id);
+        debugConversationData('BEFORE SELECTION', conversation);
+
+        // Validate conversation has participants before setting
+        if (!conversation.participants || !Array.isArray(conversation.participants)) {
+            console.error('⚠️ Conversation has invalid participants data, attempting to fetch complete data...');
+
+            // Fetch full conversation data to ensure we have participants
+            if (token) {
+                fetch(`${API_URL}/api/v1/conversations/${conversation.id}`, {
+                    headers: {
+                        'Authorization': `Bearer ${token}`
+                    }
+                })
+                    .then(response => {
+                        if (response.ok) return response.json();
+                        throw new Error(`Failed to fetch complete conversation: ${response.status}`);
+                    })
+                    .then(data => {
+                        if (!data.participants || !Array.isArray(data.participants)) {
+                            console.error('❌ Server returned conversation without valid participants:', data);
+                            return;
+                        }
+                        console.log('✅ Fetched complete conversation data:', data);
+                        setMessages([]);
+                        setSelectedConversation(data);
+                    })
+                    .catch(err => {
+                        console.error('❌ Error fetching complete conversation:', err);
+                    });
+            }
+            return;
+        }
+
+        console.log('Conversation participants:', conversation.participants);
+
+        // Clear messages before loading new ones
+        setMessages([]);
         setSelectedConversation(conversation);
     };
 
@@ -704,6 +1217,8 @@ const ChatContainer: React.FC = () => {
         if (!token || !user) return;
 
         try {
+            console.log('Creating conversation with user:', selectedUser);
+
             const response = await fetch(`${API_URL}/api/v1/conversations`, {
                 method: 'POST',
                 headers: {
@@ -720,7 +1235,40 @@ const ChatContainer: React.FC = () => {
             }
 
             const conversation = await response.json();
-            setSelectedConversation(conversation);
+            console.log('📱 Created conversation:', conversation);
+
+            // Validate the conversation has participants before setting it
+            if (!conversation.participants || !Array.isArray(conversation.participants)) {
+                console.error('❌ Server returned conversation without participants, adding them manually');
+
+                // Create a complete conversation object with participants
+                const completeConversation = {
+                    ...conversation,
+                    participants: [
+                        // Add current user as participant
+                        {
+                            id: user.id,
+                            name: user.name,
+                            email: user.email,
+                            avatarUrl: user.avatarUrl
+                        },
+                        // Add selected user as participant
+                        {
+                            id: selectedUser.id,
+                            name: selectedUser.name,
+                            email: selectedUser.email,
+                            avatarUrl: selectedUser.avatarUrl
+                        }
+                    ]
+                };
+
+                console.log('📱 Using complete conversation data:', completeConversation);
+                setSelectedConversation(completeConversation);
+            } else {
+                console.log('📱 Conversation has valid participants');
+                setSelectedConversation(conversation);
+            }
+
             setMessages([]);
             setActiveTab(0); // Switch to conversations tab
         } catch (error) {
@@ -817,135 +1365,632 @@ const ChatContainer: React.FC = () => {
         }
     };
 
+    // Add a periodic message refresh for when WebSocket fails to deliver
+    useEffect(() => {
+        if (!selectedConversation?.id || !token) return;
+
+        // Set up a timer to periodically check for new messages
+        const interval = setInterval(() => {
+            if (connectionStatus === 'connected') {
+                console.log('🔄 Periodically checking for new messages in conversation:', selectedConversation.id);
+                fetchMessages(selectedConversation.id);
+            }
+        }, 10000); // Check every 10 seconds
+
+        return () => clearInterval(interval);
+    }, [selectedConversation?.id, token, connectionStatus]);
+
+    // Keep auth session alive
+    useEffect(() => {
+        if (!token) return;
+
+        // Set up a timer to periodically refresh auth session
+        const interval = setInterval(async () => {
+            console.log('🔄 Refreshing authentication session...');
+
+            // Use the refreshToken method from AuthContext
+            const refreshSuccess = await refreshToken();
+
+            if (refreshSuccess) {
+                console.log('✅ Session refresh successful');
+
+                // Check WebSocket connection
+                if (!wsRef.current || wsRef.current.readyState !== WebSocket.OPEN) {
+                    console.log('⚠️ WebSocket not connected during session refresh, reconnecting...');
+                    reconnectAttemptsRef.current = 0; // Reset reconnect attempts
+                    connectWebSocket();
+                }
+            } else {
+                console.error('❌ Session refresh failed');
+            }
+        }, 60000); // Refresh every 60 seconds
+
+        return () => clearInterval(interval);
+    }, [token, refreshToken, connectWebSocket]);
+
+    // After getting a conversation from the server, add the debug call
+    useEffect(() => {
+        if (selectedConversation) {
+            debugConversationData('AFTER SET SELECTED CONVERSATION', selectedConversation);
+        }
+    }, [selectedConversation]);
+
+    // Restore selected conversation if lost
+    useEffect(() => {
+        // If we suddenly lose our selected conversation, try to restore it
+        const handleRestoreSelectedConversation = async () => {
+            if (!selectedConversation && prevSelectedConversationRef.current && token) {
+                console.log('🚨 Selected conversation was lost! Attempting to restore:', prevSelectedConversationRef.current.id);
+
+                try {
+                    // Fetch conversation data from server
+                    const response = await fetch(`${API_URL}/api/v1/conversations/${prevSelectedConversationRef.current.id}`, {
+                        headers: {
+                            'Authorization': `Bearer ${token}`
+                        }
+                    });
+
+                    if (response.ok) {
+                        let data = await response.json();
+                        console.log('✅ Successfully restored selected conversation data:', data);
+
+                        // Ensure the conversation has valid participants
+                        if (!data.participants || !Array.isArray(data.participants) || data.participants.length === 0) {
+                            console.log('⚠️ Restored conversation missing participants, ensuring they exist');
+
+                            // Get reference participants from the previous conversation
+                            if (prevSelectedConversationRef.current?.participants) {
+                                data.participants = [...prevSelectedConversationRef.current.participants];
+                                console.log('✅ Added participants from previous conversation reference');
+                            } else if (user) {
+                                // If we don't have participants, create at least one with the current user
+                                data.participants = [{
+                                    id: user.id,
+                                    name: user.name,
+                                    email: user.email || '',
+                                    avatarUrl: user.avatarUrl || ''
+                                }];
+                                console.log('✅ Added current user as participant');
+                            }
+                        }
+
+                        // Final sanity check before setting
+                        if (!data.participants || !Array.isArray(data.participants)) {
+                            console.error('❌ Failed to ensure participants in conversation, creating minimal valid object');
+                            // Force a minimal valid conversation object
+                            data = {
+                                ...data,
+                                participants: user ? [{
+                                    id: user.id,
+                                    name: user.name,
+                                    email: user.email || '',
+                                    avatarUrl: user.avatarUrl || ''
+                                }] : []
+                            };
+                        }
+
+                        setSelectedConversation(data);
+                    }
+                } catch (error) {
+                    console.error('❌ Failed to restore conversation:', error);
+                }
+            }
+        };
+
+        handleRestoreSelectedConversation();
+    }, [selectedConversation, token, API_URL]);
+
+    useEffect(() => {
+        if (selectedConversation) {
+            // Store reference to current conversation
+            prevSelectedConversationRef.current = selectedConversation;
+        }
+    }, [selectedConversation]);
+
     return (
-        <Box sx={{ display: 'flex', height: '100vh', p: 2, gap: 2 }}>
-            {/* Sidebar */}
-            <Box sx={{ width: '33%', height: '100%' }}>
-                <Paper sx={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
-                    {/* Connection status indicator */}
-                    <Box sx={{
-                        p: 1,
+        <ThemeProvider theme={theme}>
+            <Box sx={{
+                display: 'flex',
+                height: '100vh',
+                p: 2,
+                gap: 2,
+                background: darkMode ?
+                    'radial-gradient(circle at top right, #1e40af, #0f172a)' :
+                    'radial-gradient(circle at top right, #dbeafe, #f8fafc)',
+                transition: 'background 0.5s ease',
+            }}>
+                {/* Sidebar */}
+                <Box sx={{
+                    width: '33%',
+                    height: '100%',
+                    transition: 'all 0.3s ease',
+                }}>
+                    <Paper sx={{
+                        height: '100%',
                         display: 'flex',
-                        alignItems: 'center',
-                        gap: 1,
-                        bgcolor: connectionStatus === 'connected' ? 'success.light' :
-                            connectionStatus === 'connecting' ? 'warning.light' : 'error.light',
-                        color: 'white',
-                        fontSize: '0.75rem'
+                        flexDirection: 'column',
+                        overflow: 'hidden',
+                        position: 'relative',
+                        '&::before': {
+                            content: '""',
+                            position: 'absolute',
+                            top: 0,
+                            left: 0,
+                            right: 0,
+                            height: '5px',
+                            background: 'linear-gradient(to right, #3b82f6, #8b5cf6)',
+                            zIndex: 1,
+                        },
                     }}>
-                        {connectionStatus === 'connecting' && <CircularProgress size={16} color="inherit" />}
-                        {connectionStatus === 'connected' ? 'Connected' :
-                            connectionStatus === 'connecting' ? 'Connecting...' : 'Disconnected'}
-                    </Box>
+                        {/* Profile section at the top of sidebar */}
+                        <ProfileSection onDarkModeToggle={handleDarkModeToggle} darkMode={darkMode} />
 
-                    {/* Tabs */}
-                    <Tabs
-                        value={activeTab}
-                        onChange={(_, newValue) => setActiveTab(newValue)}
-                        sx={{ borderBottom: 1, borderColor: 'divider' }}
-                    >
-                        <Tab label="Conversations" />
-                        <Tab label="Users" />
-                    </Tabs>
+                        {/* Connection status indicator */}
+                        <Box sx={{
+                            p: 1,
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            gap: 1,
+                            background: connectionStatus === 'connected' ?
+                                'linear-gradient(90deg, rgba(34,197,94,0.1) 0%, rgba(34,197,94,0.2) 100%)' :
+                                connectionStatus === 'connecting' ?
+                                    'linear-gradient(90deg, rgba(234,179,8,0.1) 0%, rgba(234,179,8,0.2) 100%)' :
+                                    'linear-gradient(90deg, rgba(239,68,68,0.1) 0%, rgba(239,68,68,0.2) 100%)',
+                            color: connectionStatus === 'connected' ?
+                                '#22c55e' :
+                                connectionStatus === 'connecting' ?
+                                    '#eab308' :
+                                    '#ef4444',
+                            fontSize: '0.75rem',
+                            transition: 'all 0.3s ease',
+                            borderBottom: '1px solid rgba(100, 116, 139, 0.1)',
+                        }}>
+                            {connectionStatus === 'connecting' && (
+                                <Box sx={{
+                                    display: 'inline-block',
+                                    width: '10px',
+                                    height: '10px',
+                                    borderRadius: '50%',
+                                    bgcolor: '#eab308',
+                                    animation: 'pulse 1.5s infinite',
+                                    mr: 1
+                                }} />
+                            )}
+                            {connectionStatus === 'connected' && (
+                                <Box sx={{
+                                    display: 'inline-block',
+                                    width: '10px',
+                                    height: '10px',
+                                    borderRadius: '50%',
+                                    bgcolor: '#22c55e',
+                                    mr: 1
+                                }} />
+                            )}
+                            {connectionStatus === 'disconnected' && (
+                                <Box sx={{
+                                    display: 'inline-block',
+                                    width: '10px',
+                                    height: '10px',
+                                    borderRadius: '50%',
+                                    bgcolor: '#ef4444',
+                                    mr: 1
+                                }} />
+                            )}
+                            {connectionStatus === 'connected' ? 'Connected' :
+                                connectionStatus === 'connecting' ? 'Connecting...' : 'Disconnected'}
+                        </Box>
 
-                    {/* List content */}
-                    <Box sx={{ flex: 1, overflow: 'auto' }}>
-                        {activeTab === 0 ? (
-                            <ConversationList
-                                onSelectConversation={handleSelectConversation}
-                                selectedConversationId={selectedConversation?.id || null}
-                            />
-                        ) : (
-                            <UserList
-                                onSelectUser={handleSelectUser}
-                                selectedUserId={selectedConversation?.participants.find(p => p.id !== user?.id)?.id}
-                            />
-                        )}
-                    </Box>
-                </Paper>
-            </Box>
+                        {/* Tabs */}
+                        <Tabs
+                            value={activeTab}
+                            onChange={(_, newValue) => setActiveTab(newValue)}
+                            sx={{
+                                borderBottom: '1px solid rgba(100, 116, 139, 0.1)',
+                                '& .MuiTabs-indicator': {
+                                    background: 'linear-gradient(to right, #3b82f6, #8b5cf6)',
+                                    height: '3px',
+                                }
+                            }}
+                            TabIndicatorProps={{
+                                children: <span className="MuiTabs-indicatorSpan" />
+                            }}
+                        >
+                            <Tab label="Conversations" sx={{
+                                textTransform: 'none',
+                                fontWeight: 600,
+                                fontSize: '0.875rem',
+                                transition: 'all 0.2s ease',
+                                opacity: activeTab === 0 ? 1 : 0.7,
+                            }} />
+                            <Tab label="Users" sx={{
+                                textTransform: 'none',
+                                fontWeight: 600,
+                                fontSize: '0.875rem',
+                                transition: 'all 0.2s ease',
+                                opacity: activeTab === 1 ? 1 : 0.7,
+                            }} />
+                        </Tabs>
 
-            {/* Chat area */}
-            <Box sx={{ flex: 1, height: '100%' }}>
-                <Paper sx={{ height: '100%', display: 'flex', flexDirection: 'column' }}>
-                    {selectedConversation ? (
-                        <>
-                            {/* Header */}
-                            <Box sx={{ p: 2, borderBottom: 1, borderColor: 'divider' }}>
-                                <Typography variant="h6">
-                                    {selectedConversation.participants.find(p => p.id !== user?.id)?.name || 'Chat'}
-                                </Typography>
-                            </Box>
+                        {/* List content */}
+                        <Box sx={{ flex: 1, overflow: 'auto' }}>
+                            {activeTab === 0 ? (
+                                <ConversationList
+                                    onSelectConversation={handleSelectConversation}
+                                    selectedConversationId={selectedConversation?.id || null}
+                                />
+                            ) : (
+                                <UserList
+                                    onSelectUser={handleSelectUser}
+                                    selectedUserId={selectedConversation?.participants?.find(p => p.id !== user?.id)?.id}
+                                />
+                            )}
+                        </Box>
+                    </Paper>
+                </Box>
 
-                            {/* Messages */}
-                            <Box sx={{ flex: 1, overflow: 'auto', p: 2 }}>
-                                {messages.map((message) => (
-                                    <Box
-                                        key={message.id}
-                                        sx={{
-                                            display: 'flex',
-                                            justifyContent: message.sender.id === user?.id ? 'flex-end' : 'flex-start',
-                                            mb: 2
-                                        }}
-                                    >
-                                        <Paper
+                {/* Chat area */}
+                <Box sx={{
+                    flex: 1,
+                    height: '100%',
+                    position: 'relative',
+                    transition: 'all 0.3s ease',
+                }}>
+                    <Paper sx={{
+                        height: '100%',
+                        display: 'flex',
+                        flexDirection: 'column',
+                        overflow: 'hidden',
+                        position: 'relative',
+                        '&::before': {
+                            content: '""',
+                            position: 'absolute',
+                            top: 0,
+                            left: 0,
+                            right: 0,
+                            height: '5px',
+                            background: 'linear-gradient(to right, #3b82f6, #8b5cf6)',
+                            zIndex: 1,
+                        },
+                    }}>
+                        {selectedConversation ? (
+                            <>
+                                {/* Header */}
+                                <Box sx={{
+                                    p: 2,
+                                    borderBottom: '1px solid rgba(100, 116, 139, 0.1)',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    gap: 2,
+                                }}>
+                                    <Box sx={{
+                                        width: 40,
+                                        height: 40,
+                                        borderRadius: '50%',
+                                        display: 'flex',
+                                        alignItems: 'center',
+                                        justifyContent: 'center',
+                                        background: 'linear-gradient(45deg, #3b82f6, #8b5cf6)',
+                                        color: 'white',
+                                        fontWeight: 'bold',
+                                        fontSize: '1.2rem',
+                                        position: 'relative',
+                                        '&::after': {
+                                            content: '""',
+                                            position: 'absolute',
+                                            width: 10,
+                                            height: 10,
+                                            borderRadius: '50%',
+                                            bgcolor: '#22c55e',
+                                            bottom: 0,
+                                            right: 0,
+                                            border: '2px solid white',
+                                        }
+                                    }}>
+                                        {(() => {
+                                            // Get data about the current conversation
+                                            const participants = selectedConversation?.participants || [];
+                                            const isSelfConversation = participants.length === 1 && participants[0]?.id === user?.id;
+                                            const recipient = participants.find((p: Participant) => p.id !== user?.id);
+
+                                            console.log('🔍 AVATAR DISPLAY DEBUG:', {
+                                                participants,
+                                                participantsCount: participants.length,
+                                                recipient,
+                                                isSelfConversation,
+                                                selfId: user?.id
+                                            });
+
+                                            // For self-conversations, show "Me"
+                                            if (isSelfConversation) return 'M';
+
+                                            // For conversations with a recipient, show their initial
+                                            if (recipient?.name) return recipient.name.charAt(0).toUpperCase();
+                                            if (recipient?.email) return recipient.email.charAt(0).toUpperCase();
+
+                                            // For group conversations, show the conversation name initial
+                                            if (selectedConversation?.name) return selectedConversation.name.charAt(0).toUpperCase();
+
+                                            // Last fallback
+                                            return 'C';
+                                        })()}
+                                    </Box>
+                                    <Box>
+                                        <Typography variant="h6" component="div">
+                                            {(() => {
+                                                // Get data about the current conversation
+                                                const participants = selectedConversation?.participants || [];
+                                                const isSelfConversation = participants.length === 1 && participants[0]?.id === user?.id;
+                                                const recipient = participants.find((p: Participant) => p.id !== user?.id);
+
+                                                // For self-conversations, show "Me (Notes)"
+                                                if (isSelfConversation) return 'Me (Notes)';
+
+                                                // For conversations with a recipient, show their name
+                                                if (recipient?.name) return recipient.name;
+                                                if (recipient?.email) return recipient.email;
+
+                                                // For group conversations, show the conversation name
+                                                if (selectedConversation?.name) return selectedConversation.name;
+
+                                                // Last fallback
+                                                return 'Chat';
+                                            })()}
+                                        </Typography>
+                                        <Typography variant="caption" color="text.secondary" sx={{ display: 'block' }}>
+                                            Online now
+                                        </Typography>
+                                    </Box>
+                                </Box>
+
+                                {/* Messages */}
+                                <Box sx={{
+                                    flex: 1,
+                                    overflow: 'auto',
+                                    p: 2,
+                                    display: 'flex',
+                                    flexDirection: 'column',
+                                    gap: 2,
+                                }}>
+                                    {messages.map((message, index) => (
+                                        <Box
+                                            key={message.id}
                                             sx={{
+                                                display: 'flex',
+                                                flexDirection: 'column',
+                                                alignItems: message.sender.id === user?.id ? 'flex-end' : 'flex-start',
+                                                alignSelf: message.sender.id === user?.id ? 'flex-end' : 'flex-start',
                                                 maxWidth: '70%',
-                                                bgcolor: message.sender.id === user?.id ? 'primary.main' : 'grey.100',
-                                                color: message.sender.id === user?.id ? 'white' : 'text.primary',
-                                                p: 2,
-                                                borderRadius: 2
+                                                position: 'relative',
+                                                animation: 'fadeIn 0.3s ease-out',
+                                                '@keyframes fadeIn': {
+                                                    '0%': {
+                                                        opacity: 0,
+                                                        transform: 'translateY(10px)'
+                                                    },
+                                                    '100%': {
+                                                        opacity: 1,
+                                                        transform: 'translateY(0)'
+                                                    }
+                                                }
                                             }}
                                         >
-                                            <Typography>{message.content}</Typography>
-                                            <Typography variant="caption" sx={{ display: 'block', mt: 1 }}>
-                                                {message.created_at ? new Date(message.created_at).toLocaleString() : 'Just now'}
+                                            <Paper
+                                                sx={{
+                                                    p: 2,
+                                                    borderRadius: message.sender.id === user?.id
+                                                        ? '16px 16px 4px 16px'
+                                                        : '16px 16px 16px 4px',
+                                                    background: message.sender.id === user?.id
+                                                        ? 'linear-gradient(135deg, #3b82f6, #8b5cf6)'
+                                                        : darkMode
+                                                            ? 'rgba(30, 41, 59, 0.8)'
+                                                            : 'rgba(255, 255, 255, 0.8)',
+                                                    color: message.sender.id === user?.id ? 'white' : 'inherit',
+                                                    boxShadow: message.sender.id === user?.id
+                                                        ? '0 4px 12px rgba(59, 130, 246, 0.25)'
+                                                        : 'none',
+                                                    backdropFilter: 'blur(10px)',
+                                                    border: message.sender.id === user?.id
+                                                        ? 'none'
+                                                        : darkMode
+                                                            ? '1px solid rgba(255, 255, 255, 0.1)'
+                                                            : '1px solid rgba(0, 0, 0, 0.05)',
+                                                }}
+                                            >
+                                                <Typography sx={{ wordBreak: 'break-word' }}>{message.content}</Typography>
+                                            </Paper>
+                                            <Typography
+                                                variant="caption"
+                                                sx={{
+                                                    mt: 0.5,
+                                                    color: darkMode ? 'rgba(255, 255, 255, 0.6)' : 'rgba(0, 0, 0, 0.6)',
+                                                    fontSize: '0.65rem',
+                                                }}
+                                            >
+                                                {message.created_at ? new Date(message.created_at).toLocaleString(undefined, {
+                                                    hour: '2-digit',
+                                                    minute: '2-digit',
+                                                    hour12: true
+                                                }) : 'Just now'}
                                             </Typography>
-                                        </Paper>
-                                    </Box>
-                                ))}
-                                <div ref={messagesEndRef} />
-                            </Box>
-
-                            {/* Message input */}
-                            <Box sx={{ p: 2, borderTop: 1, borderColor: 'divider' }}>
-                                <Box sx={{ display: 'flex', gap: 2 }}>
-                                    <TextField
-                                        fullWidth
-                                        variant="outlined"
-                                        placeholder="Type a message..."
-                                        value={newMessage}
-                                        onChange={(e) => setNewMessage(e.target.value)}
-                                        onKeyPress={(e) => {
-                                            if (e.key === 'Enter' && !e.shiftKey) {
-                                                e.preventDefault();
-                                                handleSendMessage();
-                                            }
-                                        }}
-                                        disabled={connectionStatus !== 'connected'}
-                                    />
-                                    <IconButton
-                                        color="primary"
-                                        onClick={handleSendMessage}
-                                        disabled={connectionStatus !== 'connected' || !newMessage.trim()}
-                                    >
-                                        <SendIcon />
-                                    </IconButton>
+                                        </Box>
+                                    ))}
+                                    <div ref={messagesEndRef} />
                                 </Box>
+
+                                {/* Message input */}
+                                <Box sx={{
+                                    p: 2,
+                                    borderTop: '1px solid rgba(100, 116, 139, 0.1)',
+                                    background: darkMode ? 'rgba(15, 23, 42, 0.3)' : 'rgba(248, 250, 252, 0.7)',
+                                }}>
+                                    <Box sx={{
+                                        display: 'flex',
+                                        gap: 2,
+                                        position: 'relative',
+                                    }}>
+                                        <TextField
+                                            fullWidth
+                                            variant="outlined"
+                                            placeholder="Type a message..."
+                                            value={newMessage}
+                                            onChange={(e) => setNewMessage(e.target.value)}
+                                            onKeyPress={(e) => {
+                                                if (e.key === 'Enter' && !e.shiftKey) {
+                                                    e.preventDefault();
+
+                                                    // Verify we have a valid conversation and message before sending
+                                                    if (!selectedConversation) {
+                                                        console.error('❌ No conversation selected! Cannot send message.');
+                                                        return;
+                                                    }
+
+                                                    // Check for participants and fix if missing
+                                                    if (!selectedConversation.participants || !Array.isArray(selectedConversation.participants) || selectedConversation.participants.length === 0) {
+                                                        console.log('⚠️ Fixing missing participants before sending message');
+
+                                                        // Create a new conversation object with valid participants
+                                                        const fixedConversation = {
+                                                            ...selectedConversation,
+                                                            participants: prevSelectedConversationRef.current?.participants ||
+                                                                (user ? [{
+                                                                    id: user.id,
+                                                                    name: user.name,
+                                                                    email: user.email || '',
+                                                                    avatarUrl: user.avatarUrl || ''
+                                                                }] : [])
+                                                        };
+
+                                                        // Update the conversation with fixed data
+                                                        setSelectedConversation(fixedConversation);
+
+                                                        // Allow a small time for state to update
+                                                        setTimeout(() => {
+                                                            if (!newMessage.trim()) return;
+                                                            handleSendMessage();
+                                                        }, 50);
+
+                                                        return;
+                                                    }
+
+                                                    if (!newMessage.trim()) {
+                                                        console.log('❌ Cannot send empty message');
+                                                        return;
+                                                    }
+
+                                                    handleSendMessage();
+                                                }
+                                            }}
+                                            disabled={connectionStatus !== 'connected'}
+                                            sx={{
+                                                '& .MuiOutlinedInput-root': {
+                                                    borderRadius: '24px',
+                                                    transition: 'all 0.2s ease',
+                                                    background: darkMode ? 'rgba(30, 41, 59, 0.8)' : 'rgba(255, 255, 255, 0.8)',
+                                                    backdropFilter: 'blur(10px)',
+                                                    '&.Mui-focused': {
+                                                        boxShadow: '0 0 0 3px rgba(59, 130, 246, 0.3)',
+                                                    },
+                                                    '& fieldset': {
+                                                        borderColor: 'transparent',
+                                                        transition: 'all 0.2s ease',
+                                                    },
+                                                    '&:hover fieldset': {
+                                                        borderColor: 'rgba(59, 130, 246, 0.3)',
+                                                    },
+                                                    '&.Mui-focused fieldset': {
+                                                        borderColor: 'rgba(59, 130, 246, 0.6) !important',
+                                                        borderWidth: '1px',
+                                                    },
+                                                },
+                                            }}
+                                            InputProps={{
+                                                sx: {
+                                                    pr: 1,
+                                                }
+                                            }}
+                                        />
+                                        <IconButton
+                                            color="primary"
+                                            onClick={handleSendMessage}
+                                            disabled={connectionStatus !== 'connected' || !newMessage.trim()}
+                                            sx={{
+                                                background: 'linear-gradient(135deg, #3b82f6, #8b5cf6)',
+                                                color: 'white',
+                                                width: 48,
+                                                height: 48,
+                                                transition: 'all 0.2s ease',
+                                                '&:hover': {
+                                                    background: 'linear-gradient(135deg, #2563eb, #7c3aed)',
+                                                    transform: 'translateY(-2px)',
+                                                    boxShadow: '0 4px 12px rgba(59, 130, 246, 0.25)',
+                                                },
+                                                '&:active': {
+                                                    transform: 'translateY(0)',
+                                                },
+                                                '&.Mui-disabled': {
+                                                    background: 'linear-gradient(135deg, #94a3b8, #cbd5e1)',
+                                                    color: 'rgba(255, 255, 255, 0.8)',
+                                                }
+                                            }}
+                                        >
+                                            <SendIcon />
+                                        </IconButton>
+                                    </Box>
+                                </Box>
+                            </>
+                        ) : (
+                            <Box sx={{
+                                display: 'flex',
+                                flexDirection: 'column',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                height: '100%',
+                                p: 4,
+                                textAlign: 'center'
+                            }}>
+                                <Box sx={{
+                                    width: 80,
+                                    height: 80,
+                                    borderRadius: '50%',
+                                    background: 'linear-gradient(135deg, rgba(59, 130, 246, 0.1), rgba(139, 92, 246, 0.1))',
+                                    display: 'flex',
+                                    alignItems: 'center',
+                                    justifyContent: 'center',
+                                    mb: 2,
+                                }}>
+                                    <SendIcon
+                                        sx={{
+                                            fontSize: 36,
+                                            color: 'primary.main',
+                                            transform: 'rotate(-30deg)',
+                                        }}
+                                    />
+                                </Box>
+                                <Typography variant="h6" gutterBottom>
+                                    {activeTab === 0
+                                        ? 'Select a conversation to start chatting'
+                                        : 'Select a user to start a new conversation'}
+                                </Typography>
+                                <Typography color="text.secondary" sx={{ maxWidth: 400, mb: 3 }}>
+                                    {activeTab === 0
+                                        ? 'Choose a conversation from the list to continue chatting'
+                                        : 'Browse the user list and select someone to start a new conversation'}
+                                </Typography>
                             </Box>
-                        </>
-                    ) : (
-                        <Box sx={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: '100%' }}>
-                            <Typography color="text.secondary">
-                                {activeTab === 0
-                                    ? 'Select a conversation to start chatting'
-                                    : 'Select a user to start a new conversation'}
-                            </Typography>
-                        </Box>
-                    )}
-                </Paper>
+                        )}
+                    </Paper>
+                </Box>
             </Box>
-        </Box>
+            <style jsx global>{`
+                @keyframes pulse {
+                    0% { opacity: 0.6; transform: scale(1); }
+                    50% { opacity: 1; transform: scale(1.1); }
+                    100% { opacity: 0.6; transform: scale(1); }
+                }
+            `}</style>
+        </ThemeProvider>
     );
 };
 

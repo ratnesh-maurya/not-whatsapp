@@ -53,10 +53,14 @@ export default function AuthCallbackPage() {
                 localStorage.setItem('user', JSON.stringify(user));
                 setUser(user);
 
-                console.log('Context updated, redirecting to chat...');
+                console.log('Context updated, redirecting...');
 
-                // Redirect to chat page
-                router.replace('/chat');
+                // Check if user came from the home page
+                const returnTo = localStorage.getItem('returnTo') || '/chat';
+                localStorage.removeItem('returnTo'); // Clear after use
+
+                // Redirect to the appropriate page
+                router.replace(returnTo);
             } catch (err) {
                 console.error('Authentication error:', err);
                 localStorage.removeItem('token');
